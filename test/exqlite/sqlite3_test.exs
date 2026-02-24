@@ -988,6 +988,22 @@ defmodule Exqlite.Sqlite3Test do
     end
   end
 
+  describe "errmsg after close or release" do
+    test "errmsg on closed connection returns nil" do
+      {:ok, conn} = Sqlite3.open(":memory:")
+      :ok = Sqlite3.close(conn)
+      assert nil == Exqlite.Sqlite3NIF.errmsg(conn)
+    end
+
+    test "errmsg on released statement returns nil" do
+      {:ok, conn} = Sqlite3.open(":memory:")
+      {:ok, stmt} = Sqlite3.prepare(conn, "select 1")
+      :ok = Sqlite3.release(conn, stmt)
+      assert nil == Exqlite.Sqlite3NIF.errmsg(stmt)
+      :ok = Sqlite3.close(conn)
+    end
+  end
+
   describe ".step, .columns, .multi_step, .reset, .bind_* after release" do
     # Targets statement use-after-release in exqlite_step.
     # After Sqlite3.release(conn, stmt), statement->statement is set to NULL
@@ -1061,7 +1077,9 @@ defmodule Exqlite.Sqlite3Test do
         {:ok, conn} = Sqlite3.open(":memory:")
         {:ok, stmt} = Sqlite3.prepare(conn, "select ?")
         :ok = Sqlite3.release(conn, stmt)
-        assert {:error, _} = Sqlite3.bind_parameter_count(stmt)
+        assert_raise RuntimeError, ~r"bind_parameter_count failed", fn ->
+          Sqlite3.bind_parameter_count(stmt)
+        end
         :ok = Sqlite3.close(conn)
       end
     end

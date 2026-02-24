@@ -1526,13 +1526,17 @@ exqlite_errmsg(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 
     if (enif_get_resource(env, argv[0], connection_type, (void**)&conn)) {
         connection_acquire_lock(conn);
+        if (conn->db == NULL) {
+            connection_release_lock(conn);
+            return am_nil;
+        }
         msg = sqlite3_errmsg(conn->db);
         connection_release_lock(conn);
     } else if (enif_get_resource(env, argv[0], statement_type, (void**)&statement)) {
         statement_acquire_lock(statement);
         if (statement->statement == NULL) {
             statement_release_lock(statement);
-            return make_error_tuple(env, am_connection_closed);
+            return am_nil;
         }
         msg = sqlite3_errmsg(sqlite3_db_handle(statement->statement));
         statement_release_lock(statement);

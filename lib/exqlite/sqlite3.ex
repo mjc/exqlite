@@ -136,8 +136,16 @@ defmodule Exqlite.Sqlite3 do
       2
 
   """
-  @spec bind_parameter_count(statement) :: non_neg_integer | {:error, atom()}
-  def bind_parameter_count(stmt), do: Sqlite3NIF.bind_parameter_count(stmt)
+  @spec bind_parameter_count(statement) :: non_neg_integer
+  def bind_parameter_count(stmt) do
+    case Sqlite3NIF.bind_parameter_count(stmt) do
+      count when is_integer(count) and count >= 0 ->
+        count
+
+      {:error, reason} ->
+        raise RuntimeError, "bind_parameter_count failed: #{inspect(reason)}"
+    end
+  end
 
   @type bind_value ::
           NaiveDateTime.t()
@@ -434,7 +442,7 @@ defmodule Exqlite.Sqlite3 do
   def bind_text(stmt, index, text) do
     case Sqlite3NIF.bind_text(stmt, index, text) do
       @sqlite_ok -> :ok
-      rc -> raise Exqlite.Error, message: errmsg(stmt) || errstr(rc)
+      rc -> raise Exqlite.Error, message: error_message(stmt, rc)
     end
   end
 
@@ -451,7 +459,7 @@ defmodule Exqlite.Sqlite3 do
   def bind_blob(stmt, index, blob) do
     case Sqlite3NIF.bind_blob(stmt, index, blob) do
       @sqlite_ok -> :ok
-      rc -> raise Exqlite.Error, message: errmsg(stmt) || errstr(rc)
+      rc -> raise Exqlite.Error, message: error_message(stmt, rc)
     end
   end
 
@@ -468,7 +476,7 @@ defmodule Exqlite.Sqlite3 do
   def bind_integer(stmt, index, integer) do
     case Sqlite3NIF.bind_integer(stmt, index, integer) do
       @sqlite_ok -> :ok
-      rc -> raise Exqlite.Error, message: errmsg(stmt) || errstr(rc)
+      rc -> raise Exqlite.Error, message: error_message(stmt, rc)
     end
   end
 
@@ -485,7 +493,7 @@ defmodule Exqlite.Sqlite3 do
   def bind_float(stmt, index, float) do
     case Sqlite3NIF.bind_float(stmt, index, float) do
       @sqlite_ok -> :ok
-      rc -> raise Exqlite.Error, message: errmsg(stmt) || errstr(rc)
+      rc -> raise Exqlite.Error, message: error_message(stmt, rc)
     end
   end
 
@@ -502,12 +510,21 @@ defmodule Exqlite.Sqlite3 do
   def bind_null(stmt, index) do
     case Sqlite3NIF.bind_null(stmt, index) do
       @sqlite_ok -> :ok
-      rc -> raise Exqlite.Error, message: errmsg(stmt) || errstr(rc)
+      rc -> raise Exqlite.Error, message: error_message(stmt, rc)
     end
   end
 
   defp errmsg(stmt), do: Sqlite3NIF.errmsg(stmt)
   defp errstr(rc), do: Sqlite3NIF.errstr(rc)
+
+  defp error_message(stmt, rc) do
+    errmsg(stmt) ||
+      case rc do
+        rc when is_integer(rc) -> errstr(rc)
+        {:error, reason} -> to_string(reason)
+        _ -> inspect(rc)
+      end
+  end
 
   defp convert(%Date{} = val), do: Date.to_iso8601(val)
   defp convert(%Time{} = val), do: Time.to_iso8601(val)
