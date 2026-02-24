@@ -1113,12 +1113,13 @@ connection_type_destructor(ErlNifEnv* env, void* arg)
 
     connection_t* conn = (connection_t*)arg;
 
-    if (conn->db) {
-        sqlite3_close_v2(conn->db);
-        conn->db = NULL;
-    }
-
     if (conn->mutex) {
+        connection_acquire_lock(conn);
+        if (conn->db) {
+            sqlite3_close_v2(conn->db);
+            conn->db = NULL;
+        }
+        connection_release_lock(conn);
         enif_mutex_destroy(conn->mutex);
         conn->mutex = NULL;
     }
@@ -1131,16 +1132,24 @@ statement_type_destructor(ErlNifEnv* env, void* arg)
     assert(arg);
 
     statement_t* statement = (statement_t*)arg;
-    statement_acquire_lock(statement);
 
-    if (statement->statement) {
-        sqlite3_finalize(statement->statement);
-        statement->statement = NULL;
+    // Guard against the connection destructor having already destroyed
+    // the mutex (e.g. if GC order places connection before statement).
+    // BEAM refcounting prevents this in normal use, but the check is
+    // defensive for any future path where that assumption might not hold.
+    if (statement->conn && statement->conn->mutex) {
+        statement_acquire_lock(statement);
+        if (statement->statement) {
+            sqlite3_finalize(statement->statement);
+            statement->statement = NULL;
+        }
+        statement_release_lock(statement);
     }
 
-    statement_release_lock(statement);
-    enif_release_resource(statement->conn);
-    statement->conn = NULL;
+    if (statement->conn) {
+        enif_release_resource(statement->conn);
+        statement->conn = NULL;
+    }
 }
 
 int
