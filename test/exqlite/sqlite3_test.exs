@@ -961,46 +961,53 @@ defmodule Exqlite.Sqlite3Test do
       end
     end
 
-    # Targets the close-during-multi_step deadlock:
-    # multi_step holds the connection lock for its entire sqlite3_step loop.
-    # On unfixed code, close() blocks indefinitely waiting for the lock.
-    # The fix registers a sqlite3_progress_handler that checks a `closed`
-    # flag set by close() before it acquires the lock; the handler returns
-    # non-zero, causing sqlite3_step to abort with SQLITE_INTERRUPT, which
-    # releases the lock so close() can proceed.
+    # Targets two related bugs when close() races with multi_step:
+    #
+    # Bug 1 (close wins the race): multi_step has no NULL guard, so it calls
+    # sqlite3_step on a statement whose db was zombified by sqlite3_close_v2.
+    # Zombie dbs still execute queries, so multi_step silently returns real
+    # rows instead of an error.
+    #
+    # Bug 2 (multi_step wins the race): multi_step holds the lock for its
+    # entire sqlite3_step loop with no escape hatch. close() blocks
+    # indefinitely waiting for the lock → deadlock.
+    #
+    # Fix: (a) a NULL guard at the start of multi_step returns
+    # :connection_closed when close wins; (b) a sqlite3_progress_handler
+    # registered on open sets a `closed` flag that close() writes before
+    # acquiring the lock — the handler fires inside sqlite3_step and returns
+    # SQLITE_INTERRUPT, causing multi_step to release the lock promptly.
     @tag timeout: 5_000
-    test "close does not deadlock during active multi_step" do
-      {:ok, conn} = Sqlite3.open(":memory:")
+    test "close does not deadlock or return rows during active multi_step" do
+      for _ <- 1..10 do
+        {:ok, conn} = Sqlite3.open(":memory:")
 
-      # Recursive CTE produces 1 000 000 rows without any table setup,
-      # keeping multi_step busy long enough for the race to be observable.
-      {:ok, stmt} =
-        Sqlite3.prepare(conn, """
-          WITH RECURSIVE cnt(x) AS (
-            SELECT 1 UNION ALL SELECT x+1 FROM cnt WHERE x < 1000000
-          ) SELECT x FROM cnt
-        """)
+        # Recursive CTE — no table setup, keeps multi_step busy long enough
+        # for the race to manifest in either direction.
+        {:ok, stmt} =
+          Sqlite3.prepare(conn, """
+            WITH RECURSIVE cnt(x) AS (
+              SELECT 1 UNION ALL SELECT x+1 FROM cnt WHERE x < 1000000
+            ) SELECT x FROM cnt
+          """)
 
-      parent = self()
+        parent = self()
 
-      spawn(fn ->
-        result = Sqlite3.multi_step(conn, stmt, 1_000_000)
-        send(parent, {:multi_step_done, result})
-      end)
+        spawn(fn ->
+          result = Sqlite3.multi_step(conn, stmt, 1_000_000)
+          send(parent, {:multi_step_done, result})
+        end)
 
-      # On unfixed code: close() blocks until multi_step finishes → test
-      # times out (tag timeout: 5_000).
-      # On fixed code: close() sets closed=1; progress handler fires inside
-      # sqlite3_step → SQLITE_INTERRUPT → multi_step releases lock → close
-      # proceeds immediately.
-      t0 = System.monotonic_time(:millisecond)
-      :ok = Sqlite3.close(conn)
-      elapsed = System.monotonic_time(:millisecond) - t0
+        # On unfixed code: either close() blocks (deadlock → timeout) or
+        # multi_step completes on the zombie db and returns {:rows, _}.
+        # On fixed code: multi_step always returns {:error, _} promptly.
+        :ok = Sqlite3.close(conn)
 
-      assert elapsed < 2_000,
-             "close() took #{elapsed}ms — likely deadlocked waiting for multi_step"
+        assert_receive {:multi_step_done, result}, 3_000
 
-      assert_receive {:multi_step_done, {:error, :interrupted}}, 3_000
+        assert match?({:error, _}, result),
+               "Expected {:error, _} after close, got #{inspect(result)}"
+      end
     end
   end
 end
