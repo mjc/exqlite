@@ -1556,6 +1556,12 @@ exqlite_interrupt(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     // close() holds the connection lock (so any running query has already
     // released it) then acquires interrupt_mutex before nulling conn->db.
     // interrupt() acquires interrupt_mutex here, so the two cannot overlap.
+    //
+    // Fast path: if close() has already set conn->closed, the connection is
+    // being torn down and interrupt is unnecessary — skip the lock entirely.
+    if (conn->closed) {
+        return am_ok;
+    }
     enif_mutex_lock(conn->interrupt_mutex);
     if (conn->db != NULL) {
         sqlite3_interrupt(conn->db);
