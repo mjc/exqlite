@@ -955,11 +955,13 @@ exqlite_transaction_status(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     // and then re-opens a new connection. There is a condition where by
     // the connection's database is not set but the calling elixir / erlang
     // pass an incomplete reference.
+    // Check must be inside the lock: a concurrent close() can set conn->db = NULL
+    // between the pre-lock check and the sqlite3_get_autocommit() call → segfault.
+    connection_acquire_lock(conn);
     if (!conn->db) {
+        connection_release_lock(conn);
         return make_ok_tuple(env, am_error);
     }
-
-    connection_acquire_lock(conn);
     int autocommit = sqlite3_get_autocommit(conn->db);
     connection_release_lock(conn);
 
