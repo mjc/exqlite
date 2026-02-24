@@ -924,6 +924,10 @@ exqlite_last_insert_rowid(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     }
 
     connection_acquire_lock(conn);
+    if (conn->db == NULL) {
+        connection_release_lock(conn);
+        return make_error_tuple(env, am_connection_closed);
+    }
     sqlite3_int64 last_rowid = sqlite3_last_insert_rowid(conn->db);
     connection_release_lock(conn);
     return make_ok_tuple(env, enif_make_int64(env, last_rowid));
