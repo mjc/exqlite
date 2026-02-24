@@ -40,6 +40,7 @@ static ERL_NIF_TERM am_delete;
 static ERL_NIF_TERM am_update;
 static ERL_NIF_TERM am_invalid_pid;
 static ERL_NIF_TERM am_log;
+static ERL_NIF_TERM am_interrupted;
 
 static ErlNifResourceType* connection_type       = NULL;
 static ErlNifResourceType* statement_type        = NULL;
@@ -54,6 +55,7 @@ typedef struct connection
     ErlNifMutex* mutex;
     ErlNifMutex* interrupt_mutex;
     ErlNifPid update_hook_pid;
+    volatile int closed;
 } connection_t;
 
 typedef struct statement
@@ -287,6 +289,16 @@ statement_release_lock(statement_t* statement)
     connection_release_lock(statement->conn);
 }
 
+// Called by SQLite every N VM instructions during sqlite3_step.
+// Returns non-zero to abort the current query with SQLITE_INTERRUPT.
+// Runs on the same thread as sqlite3_step, so reading conn->closed is safe.
+static int
+closed_progress_handler(void* arg)
+{
+    connection_t* conn = (connection_t*)arg;
+    return conn->closed;
+}
+
 ///
 /// Opens a new SQLite database
 ///
@@ -339,12 +351,18 @@ exqlite_open(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     }
     conn->db              = db;
     conn->mutex           = mutex;
+    conn->closed          = 0;
     conn->interrupt_mutex = enif_mutex_create("exqlite:interrupt");
     if (conn->interrupt_mutex == NULL) {
         // conn->db and conn->mutex are set; the destructor will clean them up.
         enif_release_resource(conn);
         return make_error_tuple(env, am_failed_to_create_mutex);
     }
+
+    // Fire every 1000 VM instructions during sqlite3_step. When close() sets
+    // closed=1 before acquiring the lock, the handler returns non-zero and
+    // sqlite3_step aborts with SQLITE_INTERRUPT, releasing the lock promptly.
+    sqlite3_progress_handler(db, 1000, closed_progress_handler, conn);
 
     result = enif_make_resource(env, conn);
     enif_release_resource(conn);
@@ -370,6 +388,12 @@ exqlite_close(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     if (!enif_get_resource(env, argv[0], connection_type, (void**)&conn)) {
         return make_error_tuple(env, am_invalid_connection);
     }
+
+    // Signal the progress handler to abort any running query before we
+    // try to acquire the lock.  The handler runs inside sqlite3_step on
+    // whichever thread holds the lock; it returns non-zero → SQLITE_INTERRUPT
+    // → that thread releases the lock, letting us proceed.
+    conn->closed = 1;
 
     // close connection in critical section to avoid race-condition
     // cases. Cases such as query timeout and connection pooling
@@ -812,6 +836,11 @@ exqlite_multi_step(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 
     connection_acquire_lock(conn);
 
+    if (conn->db == NULL) {
+        connection_release_lock(conn);
+        return make_error_tuple(env, am_connection_closed);
+    }
+
     if (statement->statement == NULL) {
         connection_release_lock(conn);
         return make_error_tuple(env, am_invalid_statement);
@@ -837,6 +866,11 @@ exqlite_multi_step(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
                 row  = make_row(env, statement->statement);
                 rows = enif_make_list_cell(env, row, rows);
                 break;
+
+            case SQLITE_INTERRUPT:
+                sqlite3_reset(statement->statement);
+                connection_release_lock(conn);
+                return make_error_tuple(env, am_interrupted);
 
             default:
                 sqlite3_reset(statement->statement);
@@ -1181,6 +1215,8 @@ connection_type_destructor(ErlNifEnv* env, void* arg)
 
     connection_t* conn = (connection_t*)arg;
 
+    conn->closed = 1;
+
     if (conn->mutex) {
         connection_acquire_lock(conn);
         if (conn->db) {
@@ -1273,6 +1309,7 @@ on_load(ErlNifEnv* env, void** priv, ERL_NIF_TERM info)
     am_update                              = enif_make_atom(env, "update");
     am_invalid_pid                         = enif_make_atom(env, "invalid_pid");
     am_log                                 = enif_make_atom(env, "log");
+    am_interrupted                         = enif_make_atom(env, "interrupted");
 
     connection_type = enif_open_resource_type(
       env,
