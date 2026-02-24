@@ -460,11 +460,11 @@ exqlite_changes(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
         return make_error_tuple(env, am_invalid_connection);
     }
 
+    connection_acquire_lock(conn);
     if (conn->db == NULL) {
+        connection_release_lock(conn);
         return make_error_tuple(env, am_connection_closed);
     }
-
-    connection_acquire_lock(conn);
     int changes = sqlite3_changes(conn->db);
     connection_release_lock(conn);
     return make_ok_tuple(env, enif_make_int(env, changes));
