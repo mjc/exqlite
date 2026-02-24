@@ -960,5 +960,47 @@ defmodule Exqlite.Sqlite3Test do
         assert {:error, _} = Sqlite3.set_update_hook(conn, self())
       end
     end
+
+    # Targets the close-during-multi_step deadlock:
+    # multi_step holds the connection lock for its entire sqlite3_step loop.
+    # On unfixed code, close() blocks indefinitely waiting for the lock.
+    # The fix registers a sqlite3_progress_handler that checks a `closed`
+    # flag set by close() before it acquires the lock; the handler returns
+    # non-zero, causing sqlite3_step to abort with SQLITE_INTERRUPT, which
+    # releases the lock so close() can proceed.
+    @tag timeout: 5_000
+    test "close does not deadlock during active multi_step" do
+      {:ok, conn} = Sqlite3.open(":memory:")
+
+      # Recursive CTE produces 1 000 000 rows without any table setup,
+      # keeping multi_step busy long enough for the race to be observable.
+      {:ok, stmt} =
+        Sqlite3.prepare(conn, """
+          WITH RECURSIVE cnt(x) AS (
+            SELECT 1 UNION ALL SELECT x+1 FROM cnt WHERE x < 1000000
+          ) SELECT x FROM cnt
+        """)
+
+      parent = self()
+
+      spawn(fn ->
+        result = Sqlite3.multi_step(conn, stmt, 1_000_000)
+        send(parent, {:multi_step_done, result})
+      end)
+
+      # On unfixed code: close() blocks until multi_step finishes → test
+      # times out (tag timeout: 5_000).
+      # On fixed code: close() sets closed=1; progress handler fires inside
+      # sqlite3_step → SQLITE_INTERRUPT → multi_step releases lock → close
+      # proceeds immediately.
+      t0 = System.monotonic_time(:millisecond)
+      :ok = Sqlite3.close(conn)
+      elapsed = System.monotonic_time(:millisecond) - t0
+
+      assert elapsed < 2_000,
+             "close() took #{elapsed}ms — likely deadlocked waiting for multi_step"
+
+      assert_receive {:multi_step_done, {:error, :interrupted}}, 3_000
+    end
   end
 end
