@@ -1340,6 +1340,11 @@ exqlite_set_update_hook(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 
     connection_acquire_lock(conn);
 
+    if (conn->db == NULL) {
+        connection_release_lock(conn);
+        return make_error_tuple(env, am_connection_closed);
+    }
+
     // Passing the connection as the third argument causes it to be
     // passed as the first argument to update_callback. This allows us
     // to extract the hook pid and reset the hook if the pid is not alive.
