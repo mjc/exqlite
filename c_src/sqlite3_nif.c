@@ -364,15 +364,19 @@ exqlite_close(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
         return make_error_tuple(env, am_invalid_connection);
     }
 
-    // DB is already closed, nothing to do here
-    if (conn->db == NULL) {
-        return am_ok;
-    }
-
     // close connection in critical section to avoid race-condition
     // cases. Cases such as query timeout and connection pooling
     // attempting to close the connection
     connection_acquire_lock(conn);
+
+    // DB is already closed, nothing to do here.
+    // Check must be inside the lock: two concurrent closes both pass
+    // a pre-lock NULL check, and the second would call
+    // sqlite3_get_autocommit(NULL) → segfault.
+    if (conn->db == NULL) {
+        connection_release_lock(conn);
+        return am_ok;
+    }
 
     int autocommit = sqlite3_get_autocommit(conn->db);
     if (autocommit == 0) {
