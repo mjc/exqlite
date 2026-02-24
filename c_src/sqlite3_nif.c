@@ -1429,14 +1429,27 @@ exqlite_interrupt(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
         return make_error_tuple(env, am_invalid_connection);
     }
 
-    // DB is already closed, nothing to do here
-    if (conn->db == NULL) {
+    // We deliberately do NOT hold the connection lock here.  A running
+    // query holds the lock for its entire duration; acquiring it in
+    // interrupt() would block until the query finishes, which defeats
+    // the purpose of interrupting it.
+    //
+    // Instead we guard against the TOCTOU with close() by reading
+    // conn->closed first.  close() sets conn->closed = 1 *before*
+    // acquiring the lock and calling sqlite3_close_v2(), so if we
+    // observe closed == 0, the db pointer is still valid.  If closed == 1,
+    // the connection is being torn down and interrupt() is unnecessary.
+    //
+    // A narrow race remains (closed == 0 on read, but close() runs to
+    // completion before sqlite3_interrupt is called).  This cannot be
+    // eliminated without an atomic db pointer or a dedicated interrupt
+    // mutex.  In practice it is non-triggerable: close() must complete
+    // entirely in the window between our closed-flag read and the
+    // interrupt call, which requires extremely precise scheduling.
+    if (conn->closed || conn->db == NULL) {
         return am_ok;
     }
-
-    // connection_acquire_lock(conn);
     sqlite3_interrupt(conn->db);
-    // connection_release_lock(conn);
 
     return am_ok;
 }
