@@ -1047,6 +1047,11 @@ exqlite_deserialize(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 
     connection_acquire_lock(conn);
 
+    if (conn->db == NULL) {
+        connection_release_lock(conn);
+        return make_error_tuple(env, am_connection_closed);
+    }
+
     size   = serialized.size;
     buffer = sqlite3_malloc(size);
     if (!buffer) {
