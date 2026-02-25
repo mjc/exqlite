@@ -1,0 +1,13 @@
+.{
+    .name = .exqlite,
+    .version = "0.34.0",
+    .fingerprint = 0x275c6bdef04a95a5,
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "zig_src",
+        "c_src/sqlite3.c",
+        "c_src/sqlite3.h",
+        "c_src/sqlite3ext.h",
+    },
+}
