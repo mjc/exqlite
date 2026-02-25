@@ -1147,4 +1147,63 @@ defmodule Exqlite.Sqlite3Test do
       end
     end
   end
+
+  describe "correctness audit regression tests" do
+    test "C3 — deserialize roundtrip works and connection remains usable" do
+      # C3 fix: removed the double sqlite3_free() on the error path.
+      # SQLite already frees the buffer via FREEONCLOSE when sqlite3_deserialize
+      # fails; the old code freed it a second time, corrupting the allocator.
+      # We verify the happy path: serialize → deserialize preserves data.
+      {:ok, src} = Sqlite3.open(":memory:")
+      :ok = Sqlite3.execute(src, "CREATE TABLE t(x INTEGER)")
+      :ok = Sqlite3.execute(src, "INSERT INTO t VALUES (42)")
+      {:ok, data} = Sqlite3.serialize(src, "main")
+      :ok = Sqlite3.close(src)
+
+      {:ok, dst} = Sqlite3.open(":memory:")
+      :ok = Sqlite3.deserialize(dst, "main", data)
+      {:ok, stmt} = Sqlite3.prepare(dst, "SELECT x FROM t")
+      {:row, [42]} = Sqlite3.step(dst, stmt)
+      :ok = Sqlite3.release(dst, stmt)
+      :ok = Sqlite3.close(dst)
+    end
+
+    test "C4 — set_update_hook + concurrent writes does not crash (data race regression)" do
+      {:ok, conn} = Sqlite3.open(":memory:")
+      :ok = Sqlite3.execute(conn, "CREATE TABLE t(x)")
+
+      for _ <- 1..200 do
+        listener = spawn(fn -> Process.sleep(5000) end)
+        task = Task.async(fn -> Sqlite3.set_update_hook(conn, listener) end)
+        Sqlite3.execute(conn, "INSERT INTO t VALUES (1)")
+        Task.await(task)
+        Process.exit(listener, :kill)
+      end
+
+      :ok = Sqlite3.close(conn)
+    end
+
+    test "C2 — log hook does not crash when reset concurrently" do
+      for _ <- 1..100 do
+        listener = spawn(fn -> Process.sleep(5000) end)
+        :ok = Sqlite3.set_log_hook(listener)
+        {:ok, conn} = Sqlite3.open(":memory:")
+        Sqlite3.execute(conn, "PRAGMA integrity_check")
+        :ok = Sqlite3.close(conn)
+        Process.exit(listener, :kill)
+      end
+
+      # Reset to self to clean up.
+      :ok = Sqlite3.set_log_hook(self())
+    end
+
+    test "M3 — bind_text with large but valid binary works" do
+      {:ok, conn} = Sqlite3.open(":memory:")
+      :ok = Sqlite3.execute(conn, "CREATE TABLE t(x TEXT)")
+      {:ok, stmt} = Sqlite3.prepare(conn, "INSERT INTO t VALUES (?)")
+      big = :binary.copy(<<0>>, 10_000_000)
+      assert 0 = Sqlite3NIF.bind_text(stmt, 1, big)
+      :ok = Sqlite3.close(conn)
+    end
+  end
 end
