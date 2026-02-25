@@ -60,7 +60,12 @@ defmodule Exqlite.MixProject do
 
   defp aliases do
     [
-      lint: ["format --check-formatted", "credo --all", "dialyzer"]
+      lint: [
+        "format --check-formatted",
+        "credo --all",
+        "dialyzer",
+        "zig_fmt_check"
+      ]
     ]
   end
 
@@ -86,6 +91,9 @@ defmodule Exqlite.MixProject do
         LICENSE
         .clang-format
         c_src
+        zig_src
+        build.zig
+        build.zig.zon
         Makefile*
         checksum.exs
       ),
