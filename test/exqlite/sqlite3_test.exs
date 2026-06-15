@@ -237,6 +237,51 @@ defmodule Exqlite.Sqlite3Test do
     end
   end
 
+  describe "status counters" do
+    test "returns global sqlite status counters" do
+      assert {:ok, status} = Sqlite3.status()
+
+      assert status.memory_used.current >= 0
+      assert status.memory_used.highwater >= status.memory_used.current
+      assert status.malloc_count.current >= 0
+    end
+
+    test "returns connection status counters" do
+      {:ok, conn} = Sqlite3.open(":memory:")
+
+      :ok =
+        Sqlite3.execute(conn, "create table test (id integer primary key, stuff text)")
+
+      assert {:ok, status} = Sqlite3.db_status(conn)
+      assert status.cache_used.current >= 0
+      assert status.schema_used.current > 0
+      assert status.stmt_used.current >= 0
+    end
+
+    test "returns prepared statement status counters" do
+      {:ok, conn} = Sqlite3.open(":memory:")
+      {:ok, statement} = Sqlite3.prepare(conn, "select 1")
+
+      assert {:ok, status} = Sqlite3.stmt_status(statement)
+      assert status.memused > 0
+      assert status.run == 0
+
+      assert {:row, [1]} = Sqlite3.step(conn, statement)
+      assert :done = Sqlite3.step(conn, statement)
+      assert {:ok, status} = Sqlite3.stmt_status(statement)
+      assert status.run == 1
+    end
+
+    test "statement status returns an error after release" do
+      {:ok, conn} = Sqlite3.open(":memory:")
+      {:ok, statement} = Sqlite3.prepare(conn, "select 1")
+
+      :ok = Sqlite3.release(conn, statement)
+
+      assert {:error, _reason} = Sqlite3.stmt_status(statement)
+    end
+  end
+
   describe ".bind" do
     test "binding values to a valid sql statement" do
       {:ok, conn} = Sqlite3.open(":memory:")

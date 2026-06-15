@@ -14,6 +14,8 @@ static ERL_NIF_TERM am_ok;
 static ERL_NIF_TERM am_error;
 static ERL_NIF_TERM am_badarg;
 static ERL_NIF_TERM am_nil;
+static ERL_NIF_TERM am_true;
+static ERL_NIF_TERM am_false;
 static ERL_NIF_TERM am_out_of_memory;
 static ERL_NIF_TERM am_done;
 static ERL_NIF_TERM am_row;
@@ -1033,6 +1035,133 @@ exqlite_transaction_status(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
       autocommit == 0 ? am_transaction : am_idle);
 }
 
+static int
+get_reset_flag(ERL_NIF_TERM term, int* reset)
+{
+    if (enif_is_identical(term, am_true)) {
+        *reset = 1;
+        return 1;
+    }
+
+    if (enif_is_identical(term, am_false)) {
+        *reset = 0;
+        return 1;
+    }
+
+    return 0;
+}
+
+static ERL_NIF_TERM
+make_status_tuple(ErlNifEnv* env, sqlite3_int64 current, sqlite3_int64 highwater)
+{
+    return enif_make_tuple3(
+      env, am_ok, enif_make_int64(env, current), enif_make_int64(env, highwater));
+}
+
+ERL_NIF_TERM
+exqlite_status(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+{
+    int op;
+    int reset;
+    sqlite3_int64 current;
+    sqlite3_int64 highwater;
+
+    if (argc != 2) {
+        return enif_make_badarg(env);
+    }
+
+    if (!enif_get_int(env, argv[0], &op)) {
+        return raise_badarg(env, argv[0]);
+    }
+
+    if (!get_reset_flag(argv[1], &reset)) {
+        return raise_badarg(env, argv[1]);
+    }
+
+    int rc = sqlite3_status64(op, &current, &highwater, reset);
+    if (rc != SQLITE_OK) {
+        return make_error_tuple(env, enif_make_int(env, rc));
+    }
+
+    return make_status_tuple(env, current, highwater);
+}
+
+ERL_NIF_TERM
+exqlite_db_status(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+{
+    connection_t* conn = NULL;
+    int op;
+    int reset;
+    sqlite3_int64 current;
+    sqlite3_int64 highwater;
+
+    if (argc != 3) {
+        return enif_make_badarg(env);
+    }
+
+    if (!enif_get_resource(env, argv[0], connection_type, (void**)&conn)) {
+        return make_error_tuple(env, am_invalid_connection);
+    }
+
+    if (!enif_get_int(env, argv[1], &op)) {
+        return raise_badarg(env, argv[1]);
+    }
+
+    if (!get_reset_flag(argv[2], &reset)) {
+        return raise_badarg(env, argv[2]);
+    }
+
+    connection_acquire_lock(conn);
+    if (conn->db == NULL) {
+        connection_release_lock(conn);
+        return make_error_tuple(env, am_connection_closed);
+    }
+
+    int rc = sqlite3_db_status64(conn->db, op, &current, &highwater, reset);
+    if (rc != SQLITE_OK) {
+        ERL_NIF_TERM result = make_sqlite3_error_tuple(env, rc, conn->db);
+        connection_release_lock(conn);
+        return result;
+    }
+
+    connection_release_lock(conn);
+    return make_status_tuple(env, current, highwater);
+}
+
+ERL_NIF_TERM
+exqlite_stmt_status(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+{
+    statement_t* statement = NULL;
+    int op;
+    int reset;
+
+    if (argc != 3) {
+        return enif_make_badarg(env);
+    }
+
+    if (!enif_get_resource(env, argv[0], statement_type, (void**)&statement)) {
+        return make_error_tuple(env, am_invalid_statement);
+    }
+
+    if (!enif_get_int(env, argv[1], &op)) {
+        return raise_badarg(env, argv[1]);
+    }
+
+    if (!get_reset_flag(argv[2], &reset)) {
+        return raise_badarg(env, argv[2]);
+    }
+
+    statement_acquire_lock(statement);
+    if (statement->statement == NULL) {
+        statement_release_lock(statement);
+        return make_error_tuple(env, am_invalid_statement);
+    }
+
+    int value = sqlite3_stmt_status(statement->statement, op, reset);
+    statement_release_lock(statement);
+    return enif_make_int(env, value);
+}
+
 ERL_NIF_TERM
 exqlite_serialize(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 {
@@ -1235,6 +1364,8 @@ on_load(ErlNifEnv* env, void** priv, ERL_NIF_TERM info)
     am_error                               = enif_make_atom(env, "error");
     am_badarg                              = enif_make_atom(env, "badarg");
     am_nil                                 = enif_make_atom(env, "nil");
+    am_true                                = enif_make_atom(env, "true");
+    am_false                               = enif_make_atom(env, "false");
     am_out_of_memory                       = enif_make_atom(env, "out_of_memory");
     am_done                                = enif_make_atom(env, "done");
     am_row                                 = enif_make_atom(env, "row");
@@ -1585,6 +1716,9 @@ static ErlNifFunc nif_funcs[] = {
   {"columns", 2, exqlite_columns, ERL_NIF_DIRTY_JOB_IO_BOUND},
   {"last_insert_rowid", 1, exqlite_last_insert_rowid, ERL_NIF_DIRTY_JOB_IO_BOUND},
   {"transaction_status", 1, exqlite_transaction_status, ERL_NIF_DIRTY_JOB_IO_BOUND},
+  {"status", 2, exqlite_status, 0},
+  {"db_status", 3, exqlite_db_status, ERL_NIF_DIRTY_JOB_IO_BOUND},
+  {"stmt_status", 3, exqlite_stmt_status, 0},
   {"serialize", 2, exqlite_serialize, ERL_NIF_DIRTY_JOB_IO_BOUND},
   {"deserialize", 3, exqlite_deserialize, ERL_NIF_DIRTY_JOB_IO_BOUND},
   {"release", 2, exqlite_release, ERL_NIF_DIRTY_JOB_IO_BOUND},

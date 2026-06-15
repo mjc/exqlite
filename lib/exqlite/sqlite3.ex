@@ -292,6 +292,96 @@ defmodule Exqlite.Sqlite3 do
   @spec transaction_status(db()) :: {:ok, :idle | :transaction}
   def transaction_status(conn), do: Sqlite3NIF.transaction_status(conn)
 
+  @status_ops [
+    memory_used: 0,
+    pagecache_used: 1,
+    pagecache_overflow: 2,
+    malloc_size: 5,
+    parser_stack: 6,
+    pagecache_size: 7,
+    malloc_count: 9
+  ]
+
+  @db_status_ops [
+    lookaside_used: 0,
+    cache_used: 1,
+    schema_used: 2,
+    stmt_used: 3,
+    lookaside_hit: 4,
+    lookaside_miss_size: 5,
+    lookaside_miss_full: 6,
+    cache_hit: 7,
+    cache_miss: 8,
+    cache_write: 9,
+    deferred_fks: 10,
+    cache_used_shared: 11,
+    cache_spill: 12,
+    tempbuf_spill: 13
+  ]
+
+  @stmt_status_ops [
+    fullscan_step: 1,
+    sort: 2,
+    autoindex: 3,
+    vm_step: 4,
+    reprepare: 5,
+    run: 6,
+    filter_miss: 7,
+    filter_hit: 8,
+    memused: 99
+  ]
+
+  @type status_result :: %{current: integer(), highwater: integer()}
+
+  @doc """
+  Returns SQLite global runtime memory/status counters.
+
+  The keys match SQLite's `SQLITE_STATUS_*` counters.
+  """
+  @spec status(boolean()) :: {:ok, %{atom() => status_result()}} | {:error, reason()}
+  def status(reset? \\ false) when is_boolean(reset?) do
+    collect_status(@status_ops, &Sqlite3NIF.status(&1, reset?))
+  end
+
+  @doc """
+  Returns runtime counters for a database connection.
+
+  The keys match SQLite's `SQLITE_DBSTATUS_*` counters.
+  """
+  @spec db_status(db(), boolean()) ::
+          {:ok, %{atom() => status_result()}} | {:error, reason()}
+  def db_status(conn, reset? \\ false) when is_boolean(reset?) do
+    collect_status(@db_status_ops, &Sqlite3NIF.db_status(conn, &1, reset?))
+  end
+
+  @doc """
+  Returns counters for a prepared statement.
+
+  The keys match SQLite's `SQLITE_STMTSTATUS_*` counters.
+  """
+  @spec stmt_status(statement(), boolean()) ::
+          {:ok, %{atom() => integer()}} | {:error, reason()}
+  def stmt_status(statement, reset? \\ false) when is_boolean(reset?) do
+    Enum.reduce_while(@stmt_status_ops, {:ok, %{}}, fn {name, op}, {:ok, acc} ->
+      case Sqlite3NIF.stmt_status(statement, op, reset?) do
+        value when is_integer(value) -> {:cont, {:ok, Map.put(acc, name, value)}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp collect_status(ops, fun) do
+    Enum.reduce_while(ops, {:ok, %{}}, fn {name, op}, {:ok, acc} ->
+      case fun.(op) do
+        {:ok, current, highwater} ->
+          {:cont, {:ok, Map.put(acc, name, %{current: current, highwater: highwater})}}
+
+        {:error, _reason} = error ->
+          {:halt, error}
+      end
+    end)
+  end
+
   @doc """
   Causes the database connection to free as much memory as it can. This is
   useful if you are on a memory restricted system.
